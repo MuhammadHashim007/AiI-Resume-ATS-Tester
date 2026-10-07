@@ -19,7 +19,7 @@ from pypdf import PdfReader
 # --------------------------------------------------------------------------- #
 # Tried in order. Each model gets one retry on 500/503 (overload). If a model is
 # unavailable (404), still overloaded or out of quota (429), the next is tried.
-MODEL_CHAIN = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+MODEL_CHAIN = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]
 MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 MB
 MAX_CHARS = 30_000  # truncate very long inputs to keep requests fast and cheap
 
@@ -180,7 +180,7 @@ class GeminiFailure(Exception):
         self.attempts = attempts  # list of (model, code, message)
 
 
-def call_gemini(api_key: str, prompt: str) -> str:
+def call_gemini(api_key: str, prompt: str, preferred_model: str = "") -> str:
     client = genai.Client(api_key=api_key)
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_INSTRUCTION,
@@ -188,7 +188,8 @@ def call_gemini(api_key: str, prompt: str) -> str:
         temperature=0.3,
     )
     attempts = []
-    for model in (m.strip() for m in MODEL_CHAIN):
+    chain = ([preferred_model] if preferred_model.strip() else []) + MODEL_CHAIN
+    for model in (m.strip() for m in chain):
         for attempt in range(2):
             try:
                 resp = client.models.generate_content(
@@ -458,6 +459,11 @@ def main():
             help="Leave blank to use the key stored in Streamlit Secrets (GEMINI_API_KEY).",
         )
         st.caption("Get a free key at https://aistudio.google.com/apikey")
+        manual_model = st.text_input(
+            "Model override (optional)",
+            placeholder="e.g. gemini-3.8-flash",
+            help="Google retires models often. If you see 404 errors, enter a current model ID here; it is tried first.",
+        )
         st.markdown("---")
         st.markdown(
             "**Privacy:** your resume text is sent to Google's Gemini API. "
@@ -502,7 +508,7 @@ def main():
 
         try:
             with st.spinner("🤖 Analyzing your resume with Gemini..."):
-                raw = call_gemini(api_key, build_prompt(resume_text, jd_clean))
+                raw = call_gemini(api_key, build_prompt(resume_text, jd_clean), manual_model)
                 result = parse_json(raw)
             st.session_state["result"] = result
             st.session_state["mode_label"] = mode_label
