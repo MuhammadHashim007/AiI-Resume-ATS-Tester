@@ -5,6 +5,7 @@ Streamlit + Google Gemini (google-genai SDK) + pypdf
 import io
 import json
 import re
+import time
 from datetime import datetime
 
 import streamlit as st
@@ -16,9 +17,9 @@ from pypdf import PdfReader
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-# Tried in order. If a model is unavailable (404), overloaded (503) or out of
-# quota (429), the next one is attempted.
-MODEL_CHAIN = ["gemini-3.5-flash", "gemini-2.5-flash", " gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.8-flash" ]
+# Tried in order. Each model gets one retry on 500/503 (overload). If a model is
+# unavailable (404), still overloaded or out of quota (429), the next is tried.
+MODEL_CHAIN = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
 MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 MB
 MAX_CHARS = 30_000  # truncate very long inputs to keep requests fast and cheap
 
@@ -171,6 +172,14 @@ def build_prompt(resume: str, jd: str) -> str:
     return f"{mode}\n\n{SCHEMA_HINT}\n\n{body}"
 
 
+class GeminiFailure(Exception):
+    """Raised when every model in MODEL_CHAIN failed. Holds per-model details."""
+
+    def __init__(self, attempts):
+        super().__init__("All Gemini models failed")
+        self.attempts = attempts  # list of (model, code, message)
+
+
 def call_gemini(api_key: str, prompt: str) -> str:
     client = genai.Client(api_key=api_key)
     config = types.GenerateContentConfig(
@@ -178,23 +187,30 @@ def call_gemini(api_key: str, prompt: str) -> str:
         response_mime_type="application/json",
         temperature=0.3,
     )
-    last_err = None
-    for model in MODEL_CHAIN:
-        try:
-            resp = client.models.generate_content(
-                model=model, contents=prompt, config=config
-            )
-            text = getattr(resp, "text", None)
-            if text:
-                return text
-            last_err = RuntimeError("The model returned an empty or blocked response.")
-        except genai_errors.APIError as e:
-            code = getattr(e, "code", None)
-            if code in (404, 429, 500, 503):
-                last_err = e
-                continue
-            raise
-    raise last_err or RuntimeError("No response from Gemini.")
+    attempts = []
+    for model in (m.strip() for m in MODEL_CHAIN):
+        for attempt in range(2):
+            try:
+                resp = client.models.generate_content(
+                    model=model, contents=prompt, config=config
+                )
+                text = getattr(resp, "text", None)
+                if text:
+                    return text
+                attempts.append((model, None, "Empty or blocked response"))
+                break
+            except genai_errors.APIError as e:
+                code = getattr(e, "code", None)
+                attempts.append((model, code, str(e)[:300]))
+                if code in (500, 503) and attempt == 0:
+                    time.sleep(3)  # brief pause, then retry same model once
+                    continue
+                if code in (404, 429, 500, 503):
+                    break  # move on to the next model
+                if code == 400 and "model" in str(e).lower():
+                    break  # bad model name: try the next one
+                raise  # other 400/401/403: not fixable by switching models
+    raise GeminiFailure(attempts)
 
 
 def parse_json(raw: str) -> dict:
@@ -490,6 +506,21 @@ def main():
                 result = parse_json(raw)
             st.session_state["result"] = result
             st.session_state["mode_label"] = mode_label
+        except GeminiFailure as e:
+            codes = [a[1] for a in e.attempts]
+            if codes and all(c == 429 for c in codes):
+                st.error("⏳ API quota or rate limit reached on every model. Wait a minute and retry, or use a different key.")
+            elif any(c in (500, 503) for c in codes):
+                st.error(
+                    "🛠️ Gemini is overloaded or temporarily unavailable (tried each model, "
+                    "with a retry). This is usually transient - wait 1-2 minutes and click Analyze again."
+                )
+            else:
+                st.error("⚠️ None of the Gemini models could process the request. See technical details below.")
+            with st.expander("Technical details"):
+                for model, code, msg in e.attempts:
+                    st.code(f"{model!r} -> {code}: {msg}", language=None)
+            st.stop()
         except genai_errors.APIError as e:
             code = getattr(e, "code", None)
             msg = str(e)
