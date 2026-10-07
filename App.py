@@ -18,7 +18,7 @@ from pypdf import PdfReader
 # --------------------------------------------------------------------------- #
 # Tried in order. If a model is unavailable (404), overloaded (503) or out of
 # quota (429), the next one is attempted.
-MODEL_CHAIN = ["gemini-3.5-flash"]
+MODEL_CHAIN = ["gemini-3.5-flash", "gemini-2.5-flash", " gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.8-flash" ]
 MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 MB
 MAX_CHARS = 30_000  # truncate very long inputs to keep requests fast and cheap
 
